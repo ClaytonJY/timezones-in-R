@@ -1,0 +1,679 @@
+---
+title: "Timezone Troubles (in R)"
+author: "Clayton Yochum"
+date: "May 25, 2018"
+output:
+  xaringan::moon_reader:
+    css: ["mc-xaringan.css", "mc-xaringan-fonts.css"]
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+---
+
+layout: true
+background-color: #fafaef
+<div class="my-footer"><img src="mc_logo_rectangle.png" style="height: 30px;"/></div>
+
+```{r setup, include=FALSE}
+options(htmltools.dir.version = FALSE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(knitr)
+
+example_file <- "../excel-examples.xlsx"
+```
+
+---
+
+## Excel + DST = Bad
+
+Suppose we have a spreadsheet with some regularly-spaced times in it, spanning the "spring-ahead" EST -> EDT switch on March 11, 2018
+
+```{r}
+library(readxl)
+
+tbl <- read_excel(example_file)
+tbl
+```
+
+(looks the same in Excel)
+
+---
+
+Those datetimes are all 1 hour apart from those before & after; DST means 2am becomes 3am.
+
+--
+
+But R doesn't know that:
+
+```{r}
+diff(tbl$datetime)
+```
+
+--
+
+Because the timezone is wrong!
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+tbl %>% summarize_all(tz)
+```
+
+---
+
+## Conversion
+
+We want to keep the clock-time, while changing the underlying _instant of time_; the tool for this is `lubridate::force_tz` function (rather than `with_tz`).
+
+```{r}
+fixed <- force_tz(tbl$datetime, "EST")
+fixed
+```
+
+--
+
+Those look alright, but be careful
+
+```{r}
+diff(fixed)
+```
+
+--
+
+"EST" is not what we want!
+
+---
+
+## Choose your timezone carefully!
+
+We need to use a different timezone code. 
+
+--
+
+In general, we want to use location-specific names like "America/New_York" to get a proper mix of EST/EDT
+
+```{r}
+fixed <- force_tz(tbl$datetime, "America/Detroit")
+fixed
+```
+
+--
+
+```{r}
+diff(fixed)
+```
+
+--
+
+(check `OlsonNames()` to get a full list >600 codes)
+
+---
+
+## Three Cheers for Lubridate
+
+Hard to overstate the importance of using `lubridate` anytime you're doing anything with dates/times (times in particular).
+
+--
+
+Base R can be a bit too lenient:
+
+```{r}
+x <- "2018-05-25 12:00:00"
+
+bad <- as.POSIXct(x, "America/Fake_Town")  # not in OlsonNames()
+bad
+```
+
+--
+
+What timezone is "America"??
+
+--
+
+```{r}
+with_tz(bad, "UTC")
+```
+
+No change in clock-time.
+
+---
+
+## Three Cheers for Lubridate
+
+`lubridate` has your back!
+--
+
+```{r, error=TRUE}
+as_datetime(x, "America/Fake_Town")
+```
+
+--
+
+```{r, warning=TRUE}
+good <- as_datetime(x, "America/Detroit")
+with_tz(good, "America/Fake_Town")
+```
+
+--
+
+Note the first was an _error_ and the second was a _warning_, so **be careful!**
+
+---
+
+## Which timezone is correct?
+
+Because (most) of the US observes Daylight Savings time in analogous ways, these times could be from almost anywhere in the US.
+
+--
+
+If they came from somewhere else, switching the timezone code to match will do what you want:
+
+```{r}
+nyc <- force_tz(tbl$datetime, "America/New_York")  # still Eastern
+nyc
+```
+--
+```{r}
+chi <- force_tz(tbl$datetime, "America/Chicago")  # Central
+chi
+```
+
+---
+
+## Check It
+
+We expect even spacing now; did we get it?
+
+--
+
+```{r}
+diff(nyc)
+```
+--
+```{r}
+diff(chi)
+```
+--
+Good!
+
+---
+
+## Writing to Disk
+
+What happens when we write these out?
+
+--
+
+First we stick them in a table
+
+```{r}
+tbl <- tbl %>%
+  mutate(nyc = nyc, chi = chi) %>%
+  rename(orig = datetime)
+tbl
+```
+
+--
+
+(Notice how they all _look_ the same; `tibble` doesn't show the timezones)
+
+---
+
+## Writing to Disk
+
+And write them to a CSV
+
+```{r}
+library(readr)
+
+write_csv(tbl, "tbl.csv")
+```
+
+--
+
+And read them back out
+
+```{r}
+# leave all as character
+read_csv("tbl.csv", col_types = "ccc")
+```
+
+---
+
+## UTC?
+
+All the datetimes were written to the CSV as _UTC_ (Coordinated Universal Time, same as GMT)
+
+--
+
+UTC is like the _one true timezone_
+
+--
+
+**No DST BS!**
+
+--
+
+Programming languages generally store time as UTC; timezones only change the _display_ (printed/string representation)
+
+---
+
+## Date/Time Representation
+
+R stores time as seconds-since-Unix-epoch (1970-01-01), and dates as days-since-Unix-epoch
+
+--
+
+```{r}
+as.integer(ymd_hms("1970-01-01 00:00:00"))
+```
+--
+```{r}
+as.integer(ymd("1970-01-01"))
+```
+--
+```{r}
+as.integer(ymd("1969-01-01"))
+```
+
+---
+
+## Date/Time Representation
+
+Excel is a bit, uh, _weirder_:
+
+--
+- dates and times are _floats_
+    - integer part is days-since-an-epoch, usually 1899-12-31 (can vary across version & platforms!)
+    - time-of-day is stored as the decimal component, so 1am is 1/24...which can't be represented exactly!
+
+--
+
+- Excel thinks 1900 was a leap year!
+    - it wasn't, but this is unlikely to ever be fixed
+
+--
+
+- no clear way to store-as-UTC-but-display-EST!
+
+---
+
+## Back to Reading
+
+Like `readxl::read_excel`, `readr::read_csv` will read datetimes in as UTC
+
+```{r}
+new_tbl <- read_csv("tbl.csv", col_types = "TTT")
+new_tbl
+```
+--
+```{r}
+new_tbl %>% summarize_all(tz)
+```
+
+---
+
+## Back to Reading
+
+Because R stores datetimes as UTC, this is already equivalent to the table we wrote out
+
+--
+
+```{r}
+all_equal(tbl, new_tbl)
+```
+
+--
+
+Even though the timezones are different!
+
+---
+
+## The Other Conversion
+
+To make this new table have the timezones we had before, since these are the correct _instants of time_, we'll use `with_tz` to change how they are displayed (clock time).
+
+```{r}
+new_tbl <- new_tbl %>%
+  mutate(
+    nyc = with_tz(nyc, "America/New_York"),
+    chi = with_tz(chi, "America/Chicago")
+  )
+
+new_tbl
+```
+
+---
+
+## The Other Conversion
+
+Still equal:
+
+```{r}
+all_equal(tbl, new_tbl)
+```
+
+--
+
+**N.B**: `readr` doesn't currently let us specify timezone while reading (e.g. through `col_datetime`)
+
+---
+
+## with_tz vs. force_tz
+
+An important distinction!
+
+--
+- `with_tz`:
+    - _maintains_ instant-of-time, _changes_ clock-time
+    - _same_ integer
+    - translate _correct_ times between timezones
+
+--
+
+- `force_tz`:
+    - _changes_ instant-of-time, _maintains_ clock-time
+    - _different_ integer
+    - fix non-UTC times read as UTC
+
+---
+
+## Not everyone loves UTC
+
+Writing out as UTC is great for _us_, but may not be for our clients
+
+The only way I know to write non-UTC is to convert datetime columns to `character` before writing:
+
+```{r}
+char_tbl <- mutate_all(new_tbl, as.character)
+char_tbl
+```
+
+---
+
+## Not everyone loves UTC
+
+```{r}
+write_csv(char_tbl, "char-tbl.csv")
+
+read_csv("char-tbl.csv", col_types = "ccc") # will read as datetime by default
+```
+
+--
+
+Notice `as.character` does a rather different POSIXct-to-string conversion than `readr::write_csv` did (which uses `readr::output_column`)
+
+---
+
+## Writing to Excel
+
+While you should only write directly to Excel if _absolutely necessary_, do we get similar behavior there?
+
+--
+
+We'll use the `writexl` package to investigate; it's like the other half of `readxl` (modern, maintained, C-based)
+
+```{r}
+library(writexl)
+
+# datetime & character versions
+lst(tbl, char_tbl) %>% write_xlsx(path = "output.xlsx")
+```
+
+---
+
+# Writing to Excel
+
+proper datetimes:
+
+```{r}
+read_excel("output.xlsx")
+```
+
+---
+
+# Writing to Excel
+
+character version:
+
+```{r}
+read_excel("output.xlsx", sheet = 2)
+```
+
+---
+
+# Writing to Excel
+
+We see very similar behavior to the `readr`/CSV approach:
+
+--
+- the correct-in-R `tbl` writes out as UTC times in Excel-native date/time format
+    - so we'd use `with_tz` to set timezones
+
+--
+
+- the string versions all display local time, but Excel sees them as strings, not dates
+
+---
+
+## So what do we do?
+
+There's no clear best approach here; for both CSV and XLSX we can either
+
+--
+- give proper datetimes in UTC
+    - requires a client to do some non-trivial extra work which is subject to signinficant error (e.g. EST vs. EDT)
+
+--
+
+- write them as less-usable but clock-correct _strings_
+    - ugh?
+
+--
+
+**`¯\_(ツ)_/¯`**
+
+---
+
+## Separate Dates & Times
+
+Excel users often store _datetimes_ as _date_ & _time_, in two different columns.
+
+--
+
+We can see an example in the other sheet of our example file; same data, but split across two columns. Let's read it:
+
+--
+
+```{r}
+split_tbl <- "../excel-examples.xlsx" %>%
+  read_excel(sheet = "separate")
+
+split_tbl
+```
+
+--
+
+There's that weird epoch!
+
+---
+
+## Separate Dates & Times
+
+`readxl` read both in as `POSIXct`, UTC. (can't do date-only)
+
+--
+
+```{r}
+split_tbl %>% summarize_all(tz)
+```
+
+---
+
+## Separate Dates & Times
+
+We want a single column with the date from `date` and the time from `time`.
+
+--
+
+There's a few ways we could do this:
+
+--
+1. set `date` of the `time` columns to be dates from `date` column
+1. create a new column of `POSIXct` objects composed of the relevant bits of `date` & `time`
+
+(probably others)
+
+---
+
+## Separate Dates & Times
+
+I prefer the latter:
+
+--
+
+```{r}
+split_tbl %>%
+  mutate(datetime = ymd_hms(paste(date(date), format(time, "%T")), tz = "America/New_York"))
+```
+
+---
+
+## Separate Dates & Times
+
+The alternative requires an extra step for the timezone and makes for awkward code-flow:
+
+--
+
+```{r}
+# can't figure out how to pipe this
+date(split_tbl$time) <- date(split_tbl$date)
+
+split_tbl <- split_tbl %>%
+  mutate(datetime2 = force_tz(time, "America/New_York"))
+
+split_tbl
+```
+
+---
+
+## Separate Dates & Times
+
+Now while `time` and `datetime2` _look_ the same, they have different timezones,
+
+--
+
+```{r}
+split_tbl %>% select(time, datetime2) %>% summarize_all(tz)
+```
+
+--
+
+and thus different spacing
+
+```{r}
+split_tbl %>% select(time, datetime2) %>% mutate_all(~.x - lag(.x))
+```
+
+---
+
+## Mind The Gap
+
+Not all times are valid!
+
+--
+
+```{r, warning=TRUE}
+# never happened here
+x <- "2018-03-11 02:30:00"
+
+# UTC
+ymd_hms(x)
+```
+
+--
+
+We can set the timezone on conversion:
+
+--
+
+```{r, warning=TRUE}
+ymd_hms(x, tz = "America/Detroit")
+```
+
+---
+
+## Mind The Gap
+
+Forcing after is the same, but _there's no warning_:
+
+--
+
+```{r, warning=TRUE}
+ymd_hms(x) %>% force_tz("America/Detroit")
+```
+
+--
+
+`force_tz` has a nifty `roll` arg:
+
+```{r}
+ymd_hms(x) %>% force_tz("America/Detroit", roll = TRUE)
+```
+
+--
+
+(I haven't needed this before, and hope I never do)
+
+---
+
+## The Other DST Transition
+
+"Spring Ahead" skips an hour, but "Fall Behind" _repeats_ an hour
+
+--
+
+In non-UTC data, we might get the same time repeated the switch
+
+```{r}
+x <- paste("2017-11-05", c("00:30:00", "01:30:00", "01:30:00", "02:30:00", "03:30:00")) # regularly spaced
+
+ymd_hms(x, tz = "America/Detroit")
+```
+--
+```{r}
+diff(ymd_hms(x, tz = "America/Detroit"))
+```
+
+--
+
+`lubridate` thinks both 1:30's are the _second_ one, and _I don't know what to do here_
+
+---
+
+## Lessons Learned
+
+- (non-UTC) time is a special kind of hell invented by humans
+
+--
+
+- UTC & `lubridate` save lives
+
+--
+
+- clients _rarely_ provide UTC time, so post-read conversion is generally required
+
+--
+
+- double-check everything when reading in datetimes from anywhere!
+
+--
+
+- no good way to write out non-UTC times :(
+
+--
+
+p.s. `timezones` _can_ be set for time-free dates...but does it ever matter?
